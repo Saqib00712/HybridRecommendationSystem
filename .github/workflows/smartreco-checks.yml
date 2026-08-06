@@ -1,0 +1,50 @@
+name: SmartReco Checks
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Check Python syntax
+        run: |
+          python -m compileall app/
+      
+      - name: Verify requirements
+        run: |
+          python -c "import fastapi; print('FastAPI:', fastapi.__version__)"
+          python -c "import openai; print('OpenAI:', openai.__version__)"
+      
+      - name: Check for .env in repo
+        run: |
+          if [ -f .env ]; then
+            echo "WARNING: .env file found in repository!"
+            exit 1
+          else
+            echo "OK: No .env file committed"
+          fi
+      
+      - name: Check README exists
+        run: |
+          if [ -f README.md ]; then
+            echo "OK: README.md found"
+          else
+            echo "WARNING: README.md not found"
+          fi
