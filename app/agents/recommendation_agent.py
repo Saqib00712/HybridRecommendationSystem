@@ -1,10 +1,11 @@
 """
-Recommendation Agent - Smart Matching
-Workflow: Load Activity → Analyze → Smart Retrieve → Generate
+Recommendation Agent - Smart Matching with Mesh API
+Workflow: Load Activity → Analyze → Smart Retrieve → Generate (Mesh API)
 """
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+import asyncio
 
 from app.models.product import Product
 from app.models.behavior import UserBehavior
@@ -31,7 +32,7 @@ def load_user_activity(user_id: int, db: Session) -> List[Dict]:
 
 
 def analyze_interests(activities: List[Dict], db: Session) -> Dict[str, Any]:
-    """Step 2: Analyze user interests - return categories and tags with counts"""
+    """Step 2: Analyze user interests"""
     categories = {}
     tags = {}
     last_viewed_category = None
@@ -40,13 +41,10 @@ def analyze_interests(activities: List[Dict], db: Session) -> Dict[str, Any]:
         if activity["event_type"] == "product_view" and activity["product_id"]:
             product = db.query(Product).filter(Product.id == activity["product_id"]).first()
             if product:
-                # Count categories
                 categories[product.category] = categories.get(product.category, 0) + 1
-                # Count tags
                 for tag in product.tags.split(","):
                     tag = tag.strip()
                     tags[tag] = tags.get(tag, 0) + 1
-                # Track last viewed
                 if last_viewed_category is None:
                     last_viewed_category = product.category
         
@@ -61,7 +59,7 @@ def analyze_interests(activities: List[Dict], db: Session) -> Dict[str, Any]:
 
 
 def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Dict]:
-    """Step 3: Smart retrieval - prioritize same category, then similar"""
+    """Step 3: Smart retrieval"""
     retrieved = []
     seen_ids = set()
     
@@ -69,11 +67,10 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
     last_category = interests.get("last_viewed_category")
     tags = interests.get("tags", {})
     
-    # Sort categories by frequency
     sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)
     top_categories = [c[0] for c in sorted_categories[:3]]
     
-    # STEP 1: Get products from SAME category as last viewed (MOST RELEVANT)
+    # STEP 1: Same category as last viewed
     if last_category:
         same_category = db.query(Product).filter(
             Product.category == last_category
@@ -84,7 +81,7 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
                 retrieved.append(product_to_dict(p))
                 seen_ids.add(p.id)
     
-    # STEP 2: Get products from top categories user viewed
+    # STEP 2: Top categories
     for cat in top_categories:
         if cat != last_category and len(retrieved) < 5:
             cat_products = db.query(Product).filter(
@@ -96,7 +93,7 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
                     retrieved.append(product_to_dict(p))
                     seen_ids.add(p.id)
     
-    # STEP 3: If still need more, try ChromaDB similarity
+    # STEP 3: ChromaDB similarity
     if len(retrieved) < 3 and top_categories:
         query_text = " ".join(top_categories + list(tags.keys())[:5])
         try:
@@ -114,7 +111,7 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
         except Exception as e:
             print(f"ChromaDB fallback failed: {e}")
     
-    # STEP 4: Fill remaining with popular products from same difficulty
+    # STEP 4: Fill remaining
     if len(retrieved) < 3:
         fill_products = db.query(Product).order_by(func.random()).limit(5).all()
         for p in fill_products:
@@ -141,32 +138,30 @@ def product_to_dict(product: Product) -> Dict:
 
 
 def generate_message(interests: Dict[str, Any], products: List[Dict]) -> str:
-    """Step 4: Generate personalized message based on actual interests"""
+    """Step 4: Generate message using Mesh API with fallback"""
     if not products:
         return "Browse more courses to get personalized recommendations!"
     
     categories = interests.get("categories", {})
-    last_category = interests.get("last_viewed_category", "")
+    interest_str = ", ".join(list(categories.keys())[:3]) if categories else "technology"
     
-    # Get the main category user is interested in
-    if categories:
-        main_category = max(categories, key=categories.get)
-    else:
-        main_category = last_category
+    # Try Mesh API
+    try:
+        from app.utils.mesh_api import generate_recommendation_message as mesh_generate
+        
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        message = loop.run_until_complete(mesh_generate(interest_str, products))
+        loop.close()
+        
+        if message and len(message) > 20:
+            return message
+    except Exception as e:
+        print(f"Mesh API failed: {e}")
     
-    if main_category:
-        message = f"Since you're exploring {main_category}, we found these relevant courses to deepen your skills! "
-    else:
-        message = "Based on your browsing, here are some great courses for you! "
-    
-    # Describe what we're recommending
-    product_categories = list(set([p["category"] for p in products]))
-    if len(product_categories) == 1:
-        message += f"All recommended courses are in {product_categories[0]}."
-    else:
-        message += f"We included courses from {', '.join(product_categories[:3])}."
-    
-    return message
+    # Fallback
+    product_names = [p["title"] for p in products[:3]]
+    return f"Based on your interest in {interest_str}, we recommend: {', '.join(product_names)}. Start learning today!"
 
 
 def run_recommendation_agent(user_id: int, db: Session) -> Dict[str, Any]:
@@ -188,4 +183,10 @@ def run_recommendation_agent(user_id: int, db: Session) -> Dict[str, Any]:
             }
         }
     except Exception as e:
-        return {"success": False, "message": str(e), "product_ids": [], "products": [], "interests": {}}
+        return {
+            "success": False,
+            "message": str(e),
+            "product_ids": [],
+            "products": [],
+            "interests": {}
+        }

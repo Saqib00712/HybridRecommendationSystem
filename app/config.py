@@ -1,6 +1,5 @@
 from pydantic_settings import BaseSettings
 from functools import lru_cache
-import os
 
 
 class Settings(BaseSettings):
@@ -17,7 +16,8 @@ class Settings(BaseSettings):
     
     # Mesh API
     mesh_api_key: str = ""
-    mesh_api_url: str = "https://api.mesh.ai/v1"
+    mesh_api_url: str = "https://api.meshapi.ai/v1"
+    mesh_model: str = "tencent/hy3"
     
     # LangSmith
     langsmith_api_key: str = ""
@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = ".env"
+        extra = "allow"  # ADD THIS LINE - allows extra fields from .env
 
 
 @lru_cache()
