@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block title %}Browse Products{% endblock %}
+{% block content %}
+<h2>📚 Browse Learning Products</h2>
+
+<div class="row mb-4">
+    <div class="col-md-8">
+        <div class="input-group">
+            <input type="text" id="searchInput" class="form-control" placeholder="Search courses...">
+            <button class="btn btn-primary" onclick="searchProducts()">🔍 Search</button>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <select id="categoryFilter" class="form-select" onchange="filterProducts()">
+            <option value="">All Categories</option>
+            <option>Python</option>
+            <option>Artificial Intelligence</option>
+            <option>Machine Learning</option>
+            <option>Generative AI</option>
+            <option>Agentic AI</option>
+            <option>LangGraph</option>
+            <option>LangChain</option>
+            <option>Data Science</option>
+            <option>FastAPI</option>
+            <option>Cloud</option>
+            <option>DevOps</option>
+            <option>Web Development</option>
+        </select>
+    </div>
+</div>
+
+<!-- Recommendation Popup -->
+<div id="recoPopup" style="display:none; position:fixed; top:20px; right:20px; z-index:9999; max-width:420px;">
+    <div class="card shadow-lg border-success">
+        <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+            <span>🎯 Fresh Recommendations!</span>
+            <button class="btn-close btn-close-white" onclick="closeReco()"></button>
+        </div>
+        <div class="card-body" id="recoContent" style="max-height:450px; overflow-y:auto;">
+            <div class="text-center"><div class="spinner-border spinner-border-sm"></div> Generating...</div>
+        </div>
+    </div>
+</div>
+
+<div id="productsList" class="row">
+    <div class="col-12 text-center"><div class="spinner-border"></div></div>
+</div>
+
+<script>
+async function loadProducts(category = '') {
+    let url = '/api/products/?limit=50';
+    if (category) url += '&category=' + category;
+    
+    try {
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        let html = '';
+        data.products.forEach(p => {
+            html += '<div class="col-md-4 mb-3"><div class="card product-card h-100">';
+            html += '<div class="card-body">';
+            html += '<h5>' + p.title + '</h5>';
+            html += '<span class="badge bg-primary">' + p.category + '</span> ';
+            html += '<span class="badge bg-secondary">' + p.difficulty + '</span>';
+            html += '<p class="mt-2 small">' + p.description.substring(0, 120) + '...</p>';
+            html += '<small>👨‍🏫 ' + p.instructor + ' | ⏱ ' + p.duration + '</small>';
+            html += '<br><strong>$' + p.price + '</strong>';
+            html += '<br><button class="btn btn-sm btn-success mt-2" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">';
+            html += '👁 View & Get Recommendations</button>';
+            html += '</div></div></div>';
+        });
+        
+        document.getElementById('productsList').innerHTML = html || '<p class="text-muted">No products found.</p>';
+        
+    } catch (error) {
+        document.getElementById('productsList').innerHTML = '<div class="alert alert-danger">Error loading products</div>';
+    }
+}
+
+function escapeHtml(text) {
+    return text.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+async function viewAndGetReco(productId, productTitle) {
+    const token = localStorage.getItem('token');
+    
+    if (!token) {
+        window.location.href = '/login';
+        return;
+    }
+    
+    // Show popup with loading
+    document.getElementById('recoContent').innerHTML = '<div class="text-center"><div class="spinner-border text-success"></div><p>Analyzing your interests...</p></div>';
+    document.getElementById('recoPopup').style.display = 'block';
+    
+    // Track this view - this triggers recommendation generation
+    await fetch('/api/behaviors/track', {
+        method: 'POST',
+        headers: {
+            'Authorization': 'Bearer ' + token,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            event_type: 'product_view',
+            product_id: productId
+        })
+    });
+    
+    // Small delay to allow backend to process
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    // Get the LATEST recommendation
+    try {
+        const recResponse = await fetch('/api/recommendations/latest', {
+            headers: {'Authorization': 'Bearer ' + token}
+        });
+        const recData = await recResponse.json();
+        
+        if (recData.recommendation && recData.products.length > 0) {
+            const recTime = new Date(recData.recommendation.timestamp);
+            
+            let recoHtml = '<div class="alert alert-success py-2">';
+            recoHtml += '<small>👁 You viewed: <strong>' + productTitle + '</strong></small>';
+            recoHtml += '</div>';
+            recoHtml += '<p><strong>' + recData.recommendation.generated_message + '</strong></p>';
+            recoHtml += '<hr><h6>📚 Recommended For You:</h6>';
+            
+            recData.products.forEach((p, index) => {
+                recoHtml += '<div class="card mb-2 border-left-success">';
+                recoHtml += '<div class="card-body py-2">';
+                recoHtml += '<strong>' + (index + 1) + '. ' + p.title + '</strong><br>';
+                recoHtml += '<small>';
+                recoHtml += '<span class="badge bg-primary">' + p.category + '</span> ';
+                recoHtml += '<span class="badge bg-secondary">' + p.difficulty + '</span> ';
+                recoHtml += '| $' + p.price;
+                recoHtml += '</small>';
+                recoHtml += '</div></div>';
+            });
+            
+            recoHtml += '<div class="text-muted small mt-2">';
+            recoHtml += '🕐 Updated: ' + recTime.toLocaleTimeString() + ' | ' + recTime.toLocaleDateString();
+            recoHtml += '</div>';
+            
+            document.getElementById('recoContent').innerHTML = recoHtml;
+            
+            // Auto-close after 20 seconds
+            setTimeout(closeReco, 20000);
+            
+        } else {
+            document.getElementById('recoContent').innerHTML = 
+                '<div class="alert alert-info">View more products to get better recommendations!</div>';
+        }
+    } catch (error) {
+        document.getElementById('recoContent').innerHTML = 
+            '<div class="alert alert-warning">Recommendation is being generated. View more products!</div>';
+    }
+}
+
+function closeReco() {
+    document.getElementById('recoPopup').style.display = 'none';
+}
+
+async function searchProducts() {
+    const query = document.getElementById('searchInput').value;
+    const token = localStorage.getItem('token');
+    
+    if (!query) {
+        loadProducts();
+        return;
+    }
+    
+    if (token) {
+        await fetch('/api/behaviors/track', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + token,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                event_type: 'search',
+                search_query: query
+            })
+        });
+    }
+    
+    const response = await fetch('/api/products/search?q=' + query);
+    const data = await response.json();
+    
+    let html = '';
+    data.products.forEach(p => {
+        html += '<div class="col-md-4 mb-3"><div class="card"><div class="card-body">';
+        html += '<h5>' + p.title + '</h5>';
+        html += '<span class="badge bg-primary">' + p.category + '</span>';
+        html += '<button class="btn btn-sm btn-success mt-2" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">👁 View & Get Recommendations</button>';
+        html += '</div></div></div>';
+    });
+    
+    document.getElementById('productsList').innerHTML = html || '<p>No results for: ' + query + '</p>';
+}
+
+function filterProducts() {
+    const category = document.getElementById('categoryFilter').value;
+    loadProducts(category);
+}
+
+loadProducts();
+</script>
+{% endblock %}
