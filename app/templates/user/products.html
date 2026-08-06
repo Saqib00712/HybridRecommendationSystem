@@ -37,9 +37,17 @@
             <button class="btn-close btn-close-white" onclick="closeReco()"></button>
         </div>
         <div class="card-body" id="recoContent" style="max-height:450px; overflow-y:auto;">
-            <div class="text-center"><div class="spinner-border spinner-border-sm"></div> Generating...</div>
+            <div class="text-center">
+                <div class="spinner-border text-success spinner-border-sm"></div>
+                <p class="mt-2">Analyzing your interests...</p>
+            </div>
         </div>
     </div>
+</div>
+
+<!-- Toast notification -->
+<div id="toast" style="display:none; position:fixed; bottom:20px; right:20px; z-index:9999;" class="alert alert-success shadow">
+    ✅ Product viewed! Recommendation updated.
 </div>
 
 <div id="productsList" class="row">
@@ -57,16 +65,21 @@ async function loadProducts(category = '') {
         
         let html = '';
         data.products.forEach(p => {
-            html += '<div class="col-md-4 mb-3"><div class="card product-card h-100">';
+            html += '<div class="col-md-4 mb-3"><div class="card product-card h-100 shadow-sm">';
             html += '<div class="card-body">';
-            html += '<h5>' + p.title + '</h5>';
-            html += '<span class="badge bg-primary">' + p.category + '</span> ';
-            html += '<span class="badge bg-secondary">' + p.difficulty + '</span>';
-            html += '<p class="mt-2 small">' + p.description.substring(0, 120) + '...</p>';
-            html += '<small>👨‍🏫 ' + p.instructor + ' | ⏱ ' + p.duration + '</small>';
-            html += '<br><strong>$' + p.price + '</strong>';
-            html += '<br><button class="btn btn-sm btn-success mt-2" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">';
+            html += '<h5 class="card-title">' + p.title + '</h5>';
+            html += '<span class="badge bg-primary">' + (p.category || 'General') + '</span> ';
+            html += '<span class="badge bg-secondary">' + (p.difficulty || 'All Levels') + '</span>';
+            html += '<p class="mt-2 small text-muted">' + (p.description || '').substring(0, 120) + '...</p>';
+            html += '<div class="d-flex justify-content-between">';
+            html += '<small>👨‍🏫 ' + (p.instructor || 'Expert') + '</small>';
+            html += '<small>⏱ ' + (p.duration || 'Self-paced') + '</small>';
+            html += '</div>';
+            html += '<div class="d-flex justify-content-between align-items-center mt-2">';
+            html += '<strong>$' + (p.price || '0.00') + '</strong>';
+            html += '<button class="btn btn-sm btn-success" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">';
             html += '👁 View & Get Recommendations</button>';
+            html += '</div>';
             html += '</div></div></div>';
         });
         
@@ -89,11 +102,12 @@ async function viewAndGetReco(productId, productTitle) {
         return;
     }
     
-    // Show popup with loading
-    document.getElementById('recoContent').innerHTML = '<div class="text-center"><div class="spinner-border text-success"></div><p>Analyzing your interests...</p></div>';
+    // Show popup
     document.getElementById('recoPopup').style.display = 'block';
+    document.getElementById('recoContent').innerHTML = 
+        '<div class="text-center"><div class="spinner-border text-success"></div><p>Viewing: <strong>' + productTitle + '</strong></p><p class="small">Generating fresh recommendations...</p></div>';
     
-    // Track this view - this triggers recommendation generation
+    // Track this view
     await fetch('/api/behaviors/track', {
         method: 'POST',
         headers: {
@@ -106,40 +120,44 @@ async function viewAndGetReco(productId, productTitle) {
         })
     });
     
-    // Small delay to allow backend to process
-    await new Promise(resolve => setTimeout(resolve, 500));
+    // Show toast
+    showToast();
     
-    // Get the LATEST recommendation
+    // Small delay for backend processing
+    await new Promise(resolve => setTimeout(resolve, 800));
+    
+    // Get latest recommendation
     try {
         const recResponse = await fetch('/api/recommendations/latest', {
             headers: {'Authorization': 'Bearer ' + token}
         });
         const recData = await recResponse.json();
         
-        if (recData.recommendation && recData.products.length > 0) {
+        if (recData.recommendation && recData.products && recData.products.length > 0) {
             const recTime = new Date(recData.recommendation.timestamp);
             
-            let recoHtml = '<div class="alert alert-success py-2">';
-            recoHtml += '<small>👁 You viewed: <strong>' + productTitle + '</strong></small>';
+            let recoHtml = '<div class="alert alert-success py-2 small">';
+            recoHtml += '👁 You viewed: <strong>' + productTitle + '</strong>';
             recoHtml += '</div>';
             recoHtml += '<p><strong>' + recData.recommendation.generated_message + '</strong></p>';
             recoHtml += '<hr><h6>📚 Recommended For You:</h6>';
             
             recData.products.forEach((p, index) => {
-                recoHtml += '<div class="card mb-2 border-left-success">';
+                recoHtml += '<div class="card mb-2">';
                 recoHtml += '<div class="card-body py-2">';
                 recoHtml += '<strong>' + (index + 1) + '. ' + p.title + '</strong><br>';
                 recoHtml += '<small>';
-                recoHtml += '<span class="badge bg-primary">' + p.category + '</span> ';
-                recoHtml += '<span class="badge bg-secondary">' + p.difficulty + '</span> ';
-                recoHtml += '| $' + p.price;
+                recoHtml += '<span class="badge bg-primary">' + (p.category || 'General') + '</span> ';
+                recoHtml += '<span class="badge bg-secondary">' + (p.difficulty || 'All Levels') + '</span>';
+                recoHtml += ' | 👨‍🏫 ' + (p.instructor || 'Expert') + ' | $' + (p.price || '0');
                 recoHtml += '</small>';
                 recoHtml += '</div></div>';
             });
             
             recoHtml += '<div class="text-muted small mt-2">';
-            recoHtml += '🕐 Updated: ' + recTime.toLocaleTimeString() + ' | ' + recTime.toLocaleDateString();
+            recoHtml += '🕐 Updated: ' + recTime.toLocaleString();
             recoHtml += '</div>';
+            recoHtml += '<a href="/user/dashboard" class="btn btn-sm btn-outline-success mt-2 w-100">📊 View Full Dashboard</a>';
             
             document.getElementById('recoContent').innerHTML = recoHtml;
             
@@ -152,8 +170,14 @@ async function viewAndGetReco(productId, productTitle) {
         }
     } catch (error) {
         document.getElementById('recoContent').innerHTML = 
-            '<div class="alert alert-warning">Recommendation is being generated. View more products!</div>';
+            '<div class="alert alert-warning">Recommendation is being generated...</div>';
     }
+}
+
+function showToast() {
+    const toast = document.getElementById('toast');
+    toast.style.display = 'block';
+    setTimeout(() => { toast.style.display = 'none'; }, 3000);
 }
 
 function closeReco() {
@@ -188,9 +212,9 @@ async function searchProducts() {
     
     let html = '';
     data.products.forEach(p => {
-        html += '<div class="col-md-4 mb-3"><div class="card"><div class="card-body">';
+        html += '<div class="col-md-4 mb-3"><div class="card shadow-sm"><div class="card-body">';
         html += '<h5>' + p.title + '</h5>';
-        html += '<span class="badge bg-primary">' + p.category + '</span>';
+        html += '<span class="badge bg-primary">' + (p.category || 'General') + '</span>';
         html += '<button class="btn btn-sm btn-success mt-2" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">👁 View & Get Recommendations</button>';
         html += '</div></div></div>';
     });

@@ -19,11 +19,13 @@ async function loadDashboard() {
     }
     
     try {
+        // Get latest recommendation
         const recResponse = await fetch('/api/recommendations/latest', {
             headers: {'Authorization': 'Bearer ' + token}
         });
         const recData = await recResponse.json();
         
+        // Get recent behaviors
         const behResponse = await fetch('/api/behaviors/my?limit=10', {
             headers: {'Authorization': 'Bearer ' + token}
         });
@@ -31,65 +33,81 @@ async function loadDashboard() {
         
         let html = '<h2>👋 Welcome, ' + (user.full_name || user.username) + '!</h2>';
         
-        // Latest Recommendation
-        if (recData.recommendation) {
+        // Latest Recommendation with timestamp
+        if (recData.recommendation && recData.products && recData.products.length > 0) {
             const recTime = new Date(recData.recommendation.timestamp);
             const timeAgo = getTimeAgo(recTime);
             
-            html += '<div class="card my-4 border-success">';
-            html += '<div class="card-header bg-success text-white d-flex justify-content-between">';
+            html += '<div class="card my-4 border-success shadow">';
+            html += '<div class="card-header bg-success text-white d-flex justify-content-between align-items-center">';
             html += '<h4 class="mb-0">⭐ Your Recommendations</h4>';
             html += '<small>🕐 ' + timeAgo + '</small>';
-            html += '</div><div class="card-body">';
+            html += '</div>';
+            html += '<div class="card-body">';
             html += '<p class="lead">' + recData.recommendation.generated_message + '</p>';
             html += '<small class="text-muted">Generated: ' + recTime.toLocaleString() + '</small>';
             
-            if (recData.products && recData.products.length > 0) {
-                html += '<hr><h5>Courses for you:</h5><div class="row">';
-                recData.products.forEach(p => {
-                    html += '<div class="col-md-4 mb-3"><div class="card h-100"><div class="card-body">';
-                    html += '<h6>' + p.title + '</h6>';
-                    html += '<span class="badge bg-primary">' + p.category + '</span> ';
-                    html += '<span class="badge bg-secondary">' + p.difficulty + '</span>';
-                    html += '<p class="mt-2 small">' + p.description.substring(0, 80) + '...</p>';
-                    html += '<small>👨‍🏫 ' + p.instructor + ' | $' + p.price + '</small>';
-                    html += '</div></div></div>';
-                });
+            html += '<hr><h5>📚 Courses For You:</h5><div class="row">';
+            
+            recData.products.forEach(p => {
+                html += '<div class="col-md-4 mb-3">';
+                html += '<div class="card h-100 shadow-sm">';
+                html += '<div class="card-body">';
+                html += '<h6 class="card-title">' + p.title + '</h6>';
+                html += '<span class="badge bg-primary">' + (p.category || 'General') + '</span> ';
+                html += '<span class="badge bg-secondary">' + (p.difficulty || 'All Levels') + '</span>';
+                html += '<p class="mt-2 small text-muted">' + (p.description || '').substring(0, 80) + '...</p>';
+                html += '<div class="d-flex justify-content-between align-items-center">';
+                html += '<small>👨‍🏫 ' + (p.instructor || 'Expert Instructor') + '</small>';
+                html += '<strong>$' + (p.price || '0.00') + '</strong>';
                 html += '</div>';
-            }
+                html += '<small class="text-muted">⏱ ' + (p.duration || 'Self-paced') + '</small>';
+                html += '</div></div></div>';
+            });
+            
+            html += '</div>';
             html += '</div></div>';
         } else {
-            html += '<div class="alert alert-info">';
-            html += '<h5>🔮 How to get recommendations:</h5>';
-            html += '<p>Go to <a href="/products">Products</a> and click <strong>"View & Get Recommendations"</strong> on courses you like.</p>';
-            html += '<p>After viewing 3+ products, AI will recommend similar courses!</p>';
+            html += '<div class="alert alert-info mt-4">';
+            html += '<h5>🔮 No recommendations yet!</h5>';
+            html += '<p>Go to <a href="/products" class="btn btn-primary btn-sm">Products Page</a> and click <strong>"View & Get Recommendations"</strong> on courses you like.</p>';
+            html += '<p class="small">After viewing a few products, AI will automatically generate personalized recommendations!</p>';
             html += '</div>';
         }
         
-        // Activity History
-        html += '<div class="card"><div class="card-header bg-info text-white">';
-        html += '<h5 class="mb-0">📊 Your Activity</h5></div><div class="card-body">';
+        // Recent Activity with timestamps
+        html += '<div class="card mt-4 shadow">';
+        html += '<div class="card-header bg-info text-white">';
+        html += '<h5 class="mb-0">📊 Your Recent Activity</h5>';
+        html += '</div><div class="card-body">';
         
         if (behaviors.length > 0) {
-            html += '<ul class="list-group">';
+            html += '<div class="list-group">';
             behaviors.forEach(b => {
                 let icon = b.event_type === 'product_view' ? '👁️' : '🔍';
-                let detail = b.product_id ? 'Viewed Product #' + b.product_id : 'Searched: ' + b.search_query;
+                let detail = b.product_id ? 'Viewed Product #' + b.product_id : (b.search_query ? 'Searched: ' + b.search_query : 'Activity');
                 let time = new Date(b.timestamp);
-                html += '<li class="list-group-item d-flex justify-content-between">';
+                html += '<div class="list-group-item d-flex justify-content-between align-items-center">';
                 html += '<span>' + icon + ' ' + detail + '</span>';
                 html += '<small class="text-muted">' + time.toLocaleString() + '</small>';
-                html += '</li>';
+                html += '</div>';
             });
-            html += '</ul>';
+            html += '</div>';
         } else {
-            html += '<p class="text-muted">No activity yet.</p>';
+            html += '<p class="text-muted">No activity yet. Start browsing products!</p>';
         }
+        
         html += '</div></div>';
+        
+        // Refresh button
+        html += '<div class="text-center mt-3">';
+        html += '<button class="btn btn-outline-success" onclick="location.reload()">🔄 Refresh Dashboard</button>';
+        html += '</div>';
         
         document.getElementById('dashboardContent').innerHTML = html;
         
     } catch (error) {
+        console.error('Error:', error);
         document.getElementById('dashboardContent').innerHTML = 
             '<div class="alert alert-danger">Session expired. <a href="/login">Login again</a></div>';
     }
@@ -102,6 +120,9 @@ function getTimeAgo(date) {
     if (seconds < 86400) return Math.floor(seconds / 3600) + ' hours ago';
     return Math.floor(seconds / 86400) + ' days ago';
 }
+
+// Auto-refresh every 30 seconds
+setInterval(loadDashboard, 30000);
 
 loadDashboard();
 </script>
