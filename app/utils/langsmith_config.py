@@ -1,40 +1,43 @@
 """
-LangSmith Observability Integration
-Traces every step of the recommendation workflow
+LangSmith Observability - Complete Integration
 """
 import os
-import time
 import functools
+import time
 from app.config import get_settings
 
 settings = get_settings()
 
-# Track if LangSmith is enabled
 langsmith_enabled = False
 
 
 def setup_langsmith():
-    """Configure LangSmith tracing"""
+    """Configure and enable LangSmith tracing"""
     global langsmith_enabled
     
-    if settings.langsmith_api_key and settings.langsmith_api_key != "your-langsmith-api-key-here":
-        os.environ["LANGCHAIN_API_KEY"] = settings.langsmith_api_key
-        os.environ["LANGCHAIN_PROJECT"] = settings.langsmith_project or "smartreco-ai"
-        os.environ["LANGCHAIN_ENDPOINT"] = settings.langsmith_endpoint
+    api_key = (
+        settings.langsmith_api_key or 
+        os.getenv("LANGCHAIN_API_KEY") or 
+        os.getenv("LANGSMITH_API_KEY") or
+        ""
+    )
+    
+    if api_key and api_key != "your-langsmith-api-key-here" and len(api_key) > 10:
+        os.environ["LANGCHAIN_API_KEY"] = api_key
+        os.environ["LANGCHAIN_PROJECT"] = "smartreco-ai-final"
+        os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
         os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        
         langsmith_enabled = True
-        print(f"✅ LangSmith enabled for project: {settings.langsmith_project}")
+        print(f"✅ LangSmith enabled - Project: smartreco-ai-final")
         return True
     else:
-        print("⚠️ LangSmith API key not set - tracing disabled")
+        print(f"⚠️ LangSmith disabled - API key not found or invalid")
         return False
 
 
 def trace_agent_step(step_name: str):
-    """
-    Decorator to trace each agent step.
-    Logs: step name, execution time, success/failure
-    """
+    """Decorator to trace each agent step with timing"""
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -42,22 +45,52 @@ def trace_agent_step(step_name: str):
             try:
                 result = func(*args, **kwargs)
                 duration = time.time() - start_time
-                
-                if langsmith_enabled:
-                    print(f"📊 [TRACE] {step_name} → ✅ {duration:.2f}s")
-                else:
-                    print(f"📊 {step_name} → {duration:.2f}s")
-                
+                print(f"📊 {step_name} → ✅ {duration:.2f}s")
                 return result
-                
             except Exception as e:
                 duration = time.time() - start_time
-                print(f"❌ [TRACE] {step_name} → FAILED after {duration:.2f}s: {e}")
+                print(f"❌ {step_name} → FAILED after {duration:.2f}s: {e}")
                 raise
         return wrapper
     return decorator
 
 
-# Auto-initialize
-setup_langsmith()
+def trace_recommendation(user_id: int, steps: dict, result: dict):
+    """Send recommendation trace to LangSmith"""
+    if not langsmith_enabled:
+        return
+    
+    try:
+        from langsmith import Client
+        
+        client = Client()
+        
+        run = client.create_run(
+            name="Recommendation Agent",
+            run_type="chain",
+            inputs={"user_id": user_id},
+            outputs={
+                "message_preview": result.get("message", "")[:150],
+                "products_count": len(result.get("products", [])),
+                "execution_time": result.get("execution_time", "")
+            },
+            project_name="smartreco-ai-final",
+            tags=["recommendation", "agent", "mesh-api"],
+            metadata={
+                "interests": result.get("interests", {}),
+                "steps": steps
+            }
+        )
+        
+        if run:
+            run_id = run.id if hasattr(run, 'id') else 'success'
+            print(f"✅ LangSmith trace sent! Run ID: {run_id}")
+        else:
+            print("⚠️ LangSmith trace sent but no run ID returned")
+        
+    except Exception as e:
+        print(f"⚠️ LangSmith trace error: {e}")
 
+
+# Initialize on import
+setup_langsmith()

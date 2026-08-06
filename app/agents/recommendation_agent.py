@@ -1,6 +1,6 @@
 """
-Recommendation Agent - With LangSmith Observability
-Workflow: Load Activity → Analyze → Smart Retrieve → Re-rank → Generate (Mesh API)
+Recommendation Agent - With LangSmith Observability & Re-ranking
+Workflow: Load Activity → Analyze → Retrieve → Re-rank → Generate (Mesh API)
 """
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
@@ -12,7 +12,7 @@ from app.models.product import Product
 from app.models.behavior import UserBehavior
 from app.services.chroma_service import search_similar_products
 from app.utils.mesh_api import generate_embedding
-from app.utils.langsmith_config import trace_agent_step, langsmith_enabled
+from app.utils.langsmith_config import trace_agent_step, langsmith_enabled, trace_recommendation
 
 
 @trace_agent_step("load_user_activity")
@@ -36,7 +36,7 @@ def load_user_activity(user_id: int, db: Session) -> List[Dict]:
 
 @trace_agent_step("analyze_interests")
 def analyze_interests(activities: List[Dict], db: Session) -> Dict[str, Any]:
-    """Step 2: Analyze user interests"""
+    """Step 2: Analyze user interests from activity"""
     categories = {}
     tags = {}
     last_viewed_category = None
@@ -63,7 +63,10 @@ def analyze_interests(activities: List[Dict], db: Session) -> Dict[str, Any]:
 
 
 def rerank_products(products: List[Dict], interests: Dict[str, Any]) -> List[Dict]:
-    """Re-rank products by relevance score"""
+    """
+    Re-rank products by relevance score.
+    Priority: Same category > Tag match > Difficulty
+    """
     if not products:
         return products
     
@@ -73,15 +76,19 @@ def rerank_products(products: List[Dict], interests: Dict[str, Any]) -> List[Dic
     
     def relevance_score(product):
         score = 0
+        # Same category as last viewed = highest priority
         if product["category"] == last_category:
             score += 10
+        # Category match
         if product["category"] in categories:
             score += categories[product["category"]] * 3
+        # Tag match
         product_tags = product.get("tags", "").split(",")
         for tag in product_tags:
             tag = tag.strip()
             if tag in tags:
                 score += tags[tag]
+        # Prefer beginner/intermediate
         if product["difficulty"] in ["Beginner", "Intermediate"]:
             score += 1
         return score
@@ -91,7 +98,7 @@ def rerank_products(products: List[Dict], interests: Dict[str, Any]) -> List[Dic
 
 @trace_agent_step("retrieve_products")
 def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Dict]:
-    """Step 3: Smart retrieval with re-ranking"""
+    """Step 3: Smart retrieval with ChromaDB + category matching + re-ranking"""
     retrieved = []
     seen_ids = set()
     
@@ -102,7 +109,7 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
     sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)
     top_categories = [c[0] for c in sorted_categories[:3]]
     
-    # STEP 1: Same category as last viewed
+    # STEP 1: Same category as last viewed (MOST RELEVANT)
     if last_category:
         same_category = db.query(Product).filter(
             Product.category == last_category
@@ -113,7 +120,7 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
                 retrieved.append(product_to_dict(p))
                 seen_ids.add(p.id)
     
-    # STEP 2: Top categories
+    # STEP 2: Top categories user viewed
     for cat in top_categories:
         if cat != last_category and len(retrieved) < 5:
             cat_products = db.query(Product).filter(
@@ -125,8 +132,8 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
                     retrieved.append(product_to_dict(p))
                     seen_ids.add(p.id)
     
-    # STEP 3: ChromaDB similarity with real Mesh embeddings
-    if len(retrieved) < 3 and top_categories:
+    # STEP 3: ChromaDB similarity search
+    if len(retrieved) < 5 and top_categories:
         query_text = " ".join(top_categories + list(tags.keys())[:5])
         try:
             loop = asyncio.new_event_loop()
@@ -146,7 +153,7 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
         except Exception as e:
             print(f"ChromaDB search failed: {e}")
     
-    # STEP 4: Fill remaining
+    # STEP 4: Fill remaining with random products
     if len(retrieved) < 3:
         fill_products = db.query(Product).order_by(func.random()).limit(5).all()
         for p in fill_products:
@@ -155,7 +162,8 @@ def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Di
                 seen_ids.add(p.id)
     
     # RE-RANK before returning
-    return rerank_products(retrieved, interests)[:5]
+    ranked = rerank_products(retrieved, interests)
+    return ranked[:5]
 
 
 def product_to_dict(product: Product) -> Dict:
@@ -175,14 +183,14 @@ def product_to_dict(product: Product) -> Dict:
 
 @trace_agent_step("generate_message")
 def generate_message(interests: Dict[str, Any], products: List[Dict]) -> str:
-    """Step 4: Generate message using Mesh API"""
+    """Step 4: Generate personalized message using Mesh API LLM"""
     if not products:
         return "Browse more courses to get personalized recommendations!"
     
     categories = interests.get("categories", {})
     interest_str = ", ".join(list(categories.keys())[:3]) if categories else "technology"
     
-    # Try Mesh API
+    # Try Mesh API for AI-generated message
     try:
         from app.utils.mesh_api import generate_recommendation_message as mesh_generate
         
@@ -196,26 +204,37 @@ def generate_message(interests: Dict[str, Any], products: List[Dict]) -> str:
     except Exception as e:
         print(f"Mesh API failed: {e}")
     
-    # Fallback
+    # Fallback message
     product_names = [p["title"] for p in products[:3]]
     return f"Based on your interest in {interest_str}, we recommend: {', '.join(product_names)}. Start learning today!"
 
 
 def run_recommendation_agent(user_id: int, db: Session) -> Dict[str, Any]:
-    """Run the complete recommendation workflow with observability"""
+    """Run complete recommendation workflow with LangSmith tracing"""
     agent_start = time.time()
+    steps = {}
     
     try:
+        # Step 1: Load activity
         activities = load_user_activity(user_id, db)
+        steps["load_activity"] = f"{len(activities)} activities"
+        
+        # Step 2: Analyze interests
         interests = analyze_interests(activities, db)
+        steps["analyze_interests"] = f"{len(interests.get('categories', {}))} categories found"
+        
+        # Step 3: Retrieve & re-rank products
         products = retrieve_similar_products(interests, db)
+        steps["retrieve_products"] = f"{len(products)} products retrieved & re-ranked"
+        
+        # Step 4: Generate message via Mesh API
         message = generate_message(interests, products)
+        steps["generate_message"] = f"Message: {len(message)} characters"
         
         total_time = time.time() - agent_start
+        steps["total_time"] = f"{total_time:.2f}s"
         
-        print(f"✅ [AGENT] Complete workflow: {total_time:.2f}s | Products: {len(products)}")
-        
-        return {
+        result = {
             "success": True,
             "message": message,
             "product_ids": [p["id"] for p in products],
@@ -226,6 +245,14 @@ def run_recommendation_agent(user_id: int, db: Session) -> Dict[str, Any]:
             },
             "execution_time": f"{total_time:.2f}s"
         }
+        
+        print(f"✅ [AGENT] Complete in {total_time:.2f}s | {len(products)} products recommended")
+        
+        # Send trace to LangSmith
+        trace_recommendation(user_id, steps, result)
+        
+        return result
+        
     except Exception as e:
         total_time = time.time() - agent_start
         print(f"❌ [AGENT] Failed after {total_time:.2f}s: {e}")

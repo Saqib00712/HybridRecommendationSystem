@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     mesh_api_url: str = "https://api.meshapi.ai/v1"
     mesh_model: str = "tencent/hy3"
     
-    # LangSmith
+    # LangSmith - NOW READS FROM LANGCHAIN_API_KEY in .env
     langsmith_api_key: str = ""
-    langsmith_project: str = "smartreco-ai"
+    langsmith_project: str = "smartreco-ai-final"
     langsmith_endpoint: str = "https://api.smith.langchain.com"
     
     # App
@@ -30,7 +30,14 @@ class Settings(BaseSettings):
     
     class Config:
         env_file = ".env"
-        extra = "allow"  # ADD THIS LINE - allows extra fields from .env
+        extra = "allow"
+        
+        # Map .env variables to fields
+        fields = {
+            "langsmith_api_key": {
+                "env": ["LANGCHAIN_API_KEY", "LANGSMITH_API_KEY"]
+            }
+        }
 
 
 @lru_cache()
