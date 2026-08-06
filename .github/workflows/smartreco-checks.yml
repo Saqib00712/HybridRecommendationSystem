@@ -1,0 +1,42 @@
+name: SmartReco Checks
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install fastapi uvicorn sqlalchemy pydantic pydantic-settings python-jose passlib python-multipart chromadb aiohttp python-dotenv jinja2 apscheduler bcrypt openai
+      
+      - name: Check Python files compile
+        run: |
+          python -m py_compile app/main.py
+          python -m py_compile app/config.py
+          python -m py_compile app/database.py
+      
+      - name: Check key imports
+        run: |
+          python -c "import fastapi; print('FastAPI OK')"
+          python -c "import openai; print('OpenAI OK')"
+          python -c "import chromadb; print('ChromaDB OK')"
+      
+      - name: Check .env not committed
+        run: |
+          if [ -f .env ]; then echo "ERROR: .env found"; exit 1; else echo "OK: .env not in repo"; fi
+      
+      - name: Check README exists
+        run: |
+          if [ -f README.md ]; then echo "OK: README exists"; else echo "WARNING: No README"; fi
