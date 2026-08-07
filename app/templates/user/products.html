@@ -13,23 +13,16 @@
     <div class="col-md-4">
         <select id="categoryFilter" class="form-select" onchange="filterProducts()">
             <option value="">All Categories</option>
-            <option>Python</option>
-            <option>Artificial Intelligence</option>
-            <option>Machine Learning</option>
-            <option>Generative AI</option>
-            <option>Agentic AI</option>
-            <option>LangGraph</option>
-            <option>LangChain</option>
-            <option>Data Science</option>
-            <option>FastAPI</option>
-            <option>Cloud</option>
-            <option>DevOps</option>
-            <option>Web Development</option>
+            <option>Python</option><option>Artificial Intelligence</option>
+            <option>Machine Learning</option><option>Generative AI</option>
+            <option>Agentic AI</option><option>LangGraph</option>
+            <option>LangChain</option><option>Data Science</option>
+            <option>FastAPI</option><option>Cloud</option>
+            <option>DevOps</option><option>Web Development</option>
         </select>
     </div>
 </div>
 
-<!-- Recommendation Popup -->
 <div id="recoPopup" style="display:none; position:fixed; top:20px; right:20px; z-index:9999; max-width:420px;">
     <div class="card shadow-lg border-success">
         <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
@@ -37,15 +30,11 @@
             <button class="btn-close btn-close-white" onclick="closeReco()"></button>
         </div>
         <div class="card-body" id="recoContent" style="max-height:450px; overflow-y:auto;">
-            <div class="text-center">
-                <div class="spinner-border text-success spinner-border-sm"></div>
-                <p class="mt-2">Analyzing your interests...</p>
-            </div>
+            <div class="text-center"><div class="spinner-border text-success spinner-border-sm"></div><p>Analyzing...</p></div>
         </div>
     </div>
 </div>
 
-<!-- Toast notification -->
 <div id="toast" style="display:none; position:fixed; bottom:20px; right:20px; z-index:9999;" class="alert alert-success shadow">
     ✅ Product viewed! Recommendation updated.
 </div>
@@ -55,177 +44,158 @@
 </div>
 
 <script>
+let viewStartTime = null;
+let currentViewProductId = null;
+let eventQueue = [];
+let batchTimer = null;
+let lastEventTime = {};
+
+const token = localStorage.getItem('token');
+const user = JSON.parse(localStorage.getItem('user') || 'null');
+if (!token || !user) { window.location.href = '/login'; }
+
+function throttle(key, limitMs = 1000) {
+    const now = Date.now();
+    if (lastEventTime[key] && (now - lastEventTime[key]) < limitMs) return false;
+    lastEventTime[key] = now;
+    return true;
+}
+
+async function queueEvent(eventData) {
+    eventQueue.push(eventData);
+    if (eventQueue.length >= 5) { await flushEvents(); }
+    else if (!batchTimer) { batchTimer = setTimeout(flushEvents, 3000); }
+}
+
+async function flushEvents() {
+    if (eventQueue.length === 0) return;
+    const batch = [...eventQueue];
+    eventQueue = [];
+    clearTimeout(batchTimer);
+    batchTimer = null;
+    const t = localStorage.getItem('token');
+    if (!t) return;
+    try {
+        await fetch('/api/behaviors/track-batch', {
+            method: 'POST',
+            headers: {'Authorization': 'Bearer ' + t, 'Content-Type': 'application/json'},
+            body: JSON.stringify({ events: batch })
+        });
+        console.log('📦 Batch sent: ' + batch.length + ' events');
+    } catch(e) { console.log('Batch error:', e); }
+}
+
+let scrollThrottleTimer = null;
+window.addEventListener('scroll', function() {
+    if (scrollThrottleTimer) return;
+    scrollThrottleTimer = setTimeout(() => {
+        scrollThrottleTimer = null;
+        const pct = Math.round((window.scrollY / (document.body.scrollHeight - window.innerHeight)) * 100);
+        if (pct % 25 === 0) {
+            queueEvent({ event_type: 'scroll', search_query: 'scroll_' + pct + '%' });
+        }
+    }, 1000);
+});
+
 async function loadProducts(category = '') {
     let url = '/api/products/?limit=50';
     if (category) url += '&category=' + category;
-    
     try {
         const response = await fetch(url);
         const data = await response.json();
-        
         let html = '';
         data.products.forEach(p => {
-            html += '<div class="col-md-4 mb-3"><div class="card product-card h-100 shadow-sm">';
-            html += '<div class="card-body">';
+            html += '<div class="col-md-4 mb-3"><div class="card product-card h-100 shadow-sm"><div class="card-body">';
             html += '<h5 class="card-title">' + p.title + '</h5>';
-            html += '<span class="badge bg-primary">' + (p.category || 'General') + '</span> ';
-            html += '<span class="badge bg-secondary">' + (p.difficulty || 'All Levels') + '</span>';
-            html += '<p class="mt-2 small text-muted">' + (p.description || '').substring(0, 120) + '...</p>';
-            html += '<div class="d-flex justify-content-between">';
-            html += '<small>👨‍🏫 ' + (p.instructor || 'Expert') + '</small>';
-            html += '<small>⏱ ' + (p.duration || 'Self-paced') + '</small>';
-            html += '</div>';
-            html += '<div class="d-flex justify-content-between align-items-center mt-2">';
-            html += '<strong>$' + (p.price || '0.00') + '</strong>';
-            html += '<button class="btn btn-sm btn-success" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">';
-            html += '👁 View & Get Recommendations</button>';
-            html += '</div>';
+            html += '<span class="badge bg-primary">' + (p.category||'General') + '</span> ';
+            html += '<span class="badge bg-secondary">' + (p.difficulty||'All Levels') + '</span>';
+            html += '<p class="mt-2 small text-muted">' + (p.description||'').substring(0,120) + '...</p>';
+            html += '<div class="d-flex justify-content-between"><small>👨‍🏫 ' + (p.instructor||'Expert') + '</small><small>⏱ ' + (p.duration||'Self-paced') + '</small></div>';
+            html += '<div class="d-flex justify-content-between align-items-center mt-2"><strong>$' + (p.price||'0.00') + '</strong>';
+            html += '<button class="btn btn-sm btn-success" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">👁 View & Get Recommendations</button></div>';
             html += '</div></div></div>';
         });
-        
         document.getElementById('productsList').innerHTML = html || '<p class="text-muted">No products found.</p>';
-        
-    } catch (error) {
-        document.getElementById('productsList').innerHTML = '<div class="alert alert-danger">Error loading products</div>';
-    }
+    } catch(error) { document.getElementById('productsList').innerHTML = '<div class="alert alert-danger">Error</div>'; }
 }
 
-function escapeHtml(text) {
-    return text.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-}
+function escapeHtml(text) { return text.replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
 
 async function viewAndGetReco(productId, productTitle) {
-    const token = localStorage.getItem('token');
+    const t = localStorage.getItem('token');
+    if (!t) { window.location.href = '/login'; return; }
     
-    if (!token) {
-        window.location.href = '/login';
-        return;
-    }
-    
-    // Show popup
-    document.getElementById('recoPopup').style.display = 'block';
-    document.getElementById('recoContent').innerHTML = 
-        '<div class="text-center"><div class="spinner-border text-success"></div><p>Viewing: <strong>' + productTitle + '</strong></p><p class="small">Generating fresh recommendations...</p></div>';
-    
-    // Track this view
-    await fetch('/api/behaviors/track', {
-        method: 'POST',
-        headers: {
-            'Authorization': 'Bearer ' + token,
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-            event_type: 'product_view',
-            product_id: productId
-        })
-    });
-    
-    // Show toast
-    showToast();
-    
-    // Small delay for backend processing
-    await new Promise(resolve => setTimeout(resolve, 800));
-    
-    // Get latest recommendation
-    try {
-        const recResponse = await fetch('/api/recommendations/latest', {
-            headers: {'Authorization': 'Bearer ' + token}
-        });
-        const recData = await recResponse.json();
-        
-        if (recData.recommendation && recData.products && recData.products.length > 0) {
-            const recTime = new Date(recData.recommendation.timestamp);
-            
-            let recoHtml = '<div class="alert alert-success py-2 small">';
-            recoHtml += '👁 You viewed: <strong>' + productTitle + '</strong>';
-            recoHtml += '</div>';
-            recoHtml += '<p><strong>' + recData.recommendation.generated_message + '</strong></p>';
-            recoHtml += '<hr><h6>📚 Recommended For You:</h6>';
-            
-            recData.products.forEach((p, index) => {
-                recoHtml += '<div class="card mb-2">';
-                recoHtml += '<div class="card-body py-2">';
-                recoHtml += '<strong>' + (index + 1) + '. ' + p.title + '</strong><br>';
-                recoHtml += '<small>';
-                recoHtml += '<span class="badge bg-primary">' + (p.category || 'General') + '</span> ';
-                recoHtml += '<span class="badge bg-secondary">' + (p.difficulty || 'All Levels') + '</span>';
-                recoHtml += ' | 👨‍🏫 ' + (p.instructor || 'Expert') + ' | $' + (p.price || '0');
-                recoHtml += '</small>';
-                recoHtml += '</div></div>';
-            });
-            
-            recoHtml += '<div class="text-muted small mt-2">';
-            recoHtml += '🕐 Updated: ' + recTime.toLocaleString();
-            recoHtml += '</div>';
-            recoHtml += '<a href="/user/dashboard" class="btn btn-sm btn-outline-success mt-2 w-100">📊 View Full Dashboard</a>';
-            
-            document.getElementById('recoContent').innerHTML = recoHtml;
-            
-            // Auto-close after 20 seconds
-            setTimeout(closeReco, 20000);
-            
-        } else {
-            document.getElementById('recoContent').innerHTML = 
-                '<div class="alert alert-info">View more products to get better recommendations!</div>';
+    if (viewStartTime && currentViewProductId) {
+        const ts = Math.round((Date.now() - viewStartTime) / 1000);
+        if (ts > 1) {
+            await queueEvent({ event_type: 'product_view', product_id: currentViewProductId, time_spent: ts });
+            console.log('⏱ Time on #' + currentViewProductId + ': ' + ts + 's');
         }
-    } catch (error) {
-        document.getElementById('recoContent').innerHTML = 
-            '<div class="alert alert-warning">Recommendation is being generated...</div>';
     }
+    viewStartTime = Date.now();
+    currentViewProductId = productId;
+    
+    document.getElementById('recoPopup').style.display = 'block';
+    document.getElementById('recoContent').innerHTML = '<div class="text-center"><div class="spinner-border text-success"></div><p>Viewing: <strong>' + productTitle + '</strong></p></div>';
+    
+    await queueEvent({ event_type: 'product_view', product_id: productId });
+    await flushEvents();
+    
+    document.getElementById('toast').style.display = 'block';
+    setTimeout(() => { document.getElementById('toast').style.display = 'none'; }, 3000);
+    await new Promise(r => setTimeout(r, 800));
+    
+    try {
+        const recRes = await fetch('/api/recommendations/latest', { headers: {'Authorization': 'Bearer ' + t} });
+        const recData = await recRes.json();
+        if (recData.recommendation && recData.products && recData.products.length > 0) {
+            const rt = new Date(recData.recommendation.timestamp);
+            let html = '<div class="alert alert-success py-2 small">👁 Viewed: <strong>' + productTitle + '</strong></div>';
+            html += '<p><strong>' + recData.recommendation.generated_message + '</strong></p><hr><h6>📚 Recommended:</h6>';
+            recData.products.forEach((p,i) => {
+                html += '<div class="card mb-2"><div class="card-body py-2"><strong>' + (i+1) + '. ' + p.title + '</strong><br>';
+                html += '<small><span class="badge bg-primary">' + (p.category||'') + '</span> ';
+                html += '<span class="badge bg-secondary">' + (p.difficulty||'') + '</span>';
+                html += ' | 👨‍🏫 ' + (p.instructor||'Expert') + ' | $' + (p.price||'0') + '</small></div></div>';
+            });
+            html += '<div class="text-muted small mt-2">🕐 ' + rt.toLocaleString() + '</div>';
+            html += '<a href="/user/dashboard" class="btn btn-sm btn-outline-success mt-2 w-100">📊 Dashboard</a>';
+            document.getElementById('recoContent').innerHTML = html;
+            setTimeout(closeReco, 20000);
+        } else {
+            document.getElementById('recoContent').innerHTML = '<div class="alert alert-info">View more products!</div>';
+        }
+    } catch(e) { document.getElementById('recoContent').innerHTML = '<div class="alert alert-warning">Generating...</div>'; }
 }
 
-function showToast() {
-    const toast = document.getElementById('toast');
-    toast.style.display = 'block';
-    setTimeout(() => { toast.style.display = 'none'; }, 3000);
-}
-
-function closeReco() {
-    document.getElementById('recoPopup').style.display = 'none';
-}
+function closeReco() { document.getElementById('recoPopup').style.display = 'none'; }
 
 async function searchProducts() {
     const query = document.getElementById('searchInput').value;
-    const token = localStorage.getItem('token');
-    
-    if (!query) {
-        loadProducts();
-        return;
-    }
-    
-    if (token) {
-        await fetch('/api/behaviors/track', {
-            method: 'POST',
-            headers: {
-                'Authorization': 'Bearer ' + token,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                event_type: 'search',
-                search_query: query
-            })
-        });
-    }
-    
-    const response = await fetch('/api/products/search?q=' + query);
-    const data = await response.json();
-    
+    if (!query) { loadProducts(); return; }
+    await queueEvent({ event_type: 'search', search_query: query });
+    const res = await fetch('/api/products/search?q=' + query);
+    const data = await res.json();
     let html = '';
     data.products.forEach(p => {
-        html += '<div class="col-md-4 mb-3"><div class="card shadow-sm"><div class="card-body">';
-        html += '<h5>' + p.title + '</h5>';
-        html += '<span class="badge bg-primary">' + (p.category || 'General') + '</span>';
-        html += '<button class="btn btn-sm btn-success mt-2" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">👁 View & Get Recommendations</button>';
-        html += '</div></div></div>';
+        html += '<div class="col-md-4 mb-3"><div class="card shadow-sm"><div class="card-body"><h5>' + p.title + '</h5>';
+        html += '<span class="badge bg-primary">' + (p.category||'') + '</span>';
+        html += '<button class="btn btn-sm btn-success mt-2" onclick="viewAndGetReco(' + p.id + ', \'' + escapeHtml(p.title) + '\')">👁 View</button></div></div></div>';
     });
-    
-    document.getElementById('productsList').innerHTML = html || '<p>No results for: ' + query + '</p>';
+    document.getElementById('productsList').innerHTML = html || '<p>No results</p>';
 }
 
-function filterProducts() {
-    const category = document.getElementById('categoryFilter').value;
-    loadProducts(category);
-}
+function filterProducts() { loadProducts(document.getElementById('categoryFilter').value); }
+
+window.addEventListener('beforeunload', function() {
+    if (viewStartTime && currentViewProductId) {
+        const ts = Math.round((Date.now() - viewStartTime) / 1000);
+        const t = localStorage.getItem('token');
+        if (t && ts > 1) {
+            navigator.sendBeacon('/api/behaviors/track', JSON.stringify({ event_type: 'product_view', product_id: currentViewProductId, time_spent: ts }));
+        }
+    }
+});
 
 loadProducts();
 </script>

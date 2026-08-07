@@ -1,6 +1,6 @@
+
 """
-Recommendation Agent - Real Embeddings + Re-ranking + LangSmith
-Workflow: Load Activity → Analyze → Retrieve → Re-rank → Generate (Mesh API)
+Recommendation Agent - LangGraph-style Workflow with Hybrid Search
 """
 from typing import List, Dict, Any
 from sqlalchemy.orm import Session
@@ -12,232 +12,167 @@ from app.models.product import Product
 from app.models.behavior import UserBehavior
 from app.services.chroma_service import search_similar_products
 from app.utils.mesh_api import generate_embedding
-from app.utils.langsmith_config import trace_agent_step, langsmith_enabled, trace_recommendation
+from app.utils.langsmith_config import trace_agent_step, trace_recommendation
 
 
-@trace_agent_step("load_user_activity")
+@trace_agent_step("load_activity")
 def load_user_activity(user_id: int, db: Session) -> List[Dict]:
-    """Step 1: Load user's recent activity"""
     behaviors = db.query(UserBehavior).filter(
         UserBehavior.user_id == user_id
     ).order_by(UserBehavior.timestamp.desc()).limit(20).all()
     
-    activities = []
-    for b in behaviors:
-        activities.append({
-            "event_type": b.event_type,
-            "product_id": b.product_id,
-            "search_query": b.search_query,
-            "category": b.category
-        })
-    
-    return activities
+    return [{
+        "event_type": b.event_type, "product_id": b.product_id,
+        "search_query": b.search_query, "category": b.category,
+        "time_spent": b.time_spent
+    } for b in behaviors]
 
 
 @trace_agent_step("analyze_interests")
 def analyze_interests(activities: List[Dict], db: Session) -> Dict[str, Any]:
-    """Step 2: Analyze user interests from activity"""
-    categories = {}
-    tags = {}
-    last_viewed_category = None
+    categories, tags, total_time = {}, {}, {}
+    last_viewed = None
     
-    for activity in activities:
-        if activity["event_type"] == "product_view" and activity["product_id"]:
-            product = db.query(Product).filter(Product.id == activity["product_id"]).first()
+    for a in activities:
+        if a["event_type"] == "product_view" and a["product_id"]:
+            product = db.query(Product).filter(Product.id == a["product_id"]).first()
             if product:
                 categories[product.category] = categories.get(product.category, 0) + 1
                 for tag in product.tags.split(","):
-                    tag = tag.strip()
-                    tags[tag] = tags.get(tag, 0) + 1
-                if last_viewed_category is None:
-                    last_viewed_category = product.category
-        
-        if activity["event_type"] == "search" and activity["search_query"]:
-            tags[activity["search_query"]] = tags.get(activity["search_query"], 0) + 1
+                    tags[tag.strip()] = tags.get(tag.strip(), 0) + 1
+                if a.get("time_spent"):
+                    total_time[product.category] = total_time.get(product.category, 0) + a["time_spent"]
+                if last_viewed is None:
+                    last_viewed = product.category
+        if a["event_type"] == "search" and a["search_query"]:
+            tags[a["search_query"]] = tags.get(a["search_query"], 0) + 1
     
-    return {
-        "categories": categories,
-        "tags": tags,
-        "last_viewed_category": last_viewed_category
-    }
+    return {"categories": categories, "tags": tags, "last_viewed_category": last_viewed, "total_time": total_time}
 
 
-def rerank_products(products: List[Dict], interests: Dict[str, Any]) -> List[Dict]:
-    """
-    ALWAYS re-rank products by relevance score.
-    Priority: Same category > Tag match > Difficulty
-    """
-    if not products:
-        return products
-    
-    categories = interests.get("categories", {})
+def rerank(products: List[Dict], interests: Dict) -> List[Dict]:
+    if not products: return products
+    cats = interests.get("categories", {})
     tags = interests.get("tags", {})
-    last_category = interests.get("last_viewed_category", "")
+    last_cat = interests.get("last_viewed_category", "")
+    total_time = interests.get("total_time", {})
     
-    def relevance_score(product):
-        score = 0
-        if product["category"] == last_category:
-            score += 10
-        if product["category"] in categories:
-            score += categories[product["category"]] * 3
-        product_tags = product.get("tags", "").split(",")
-        for tag in product_tags:
-            tag = tag.strip()
-            if tag in tags:
-                score += tags[tag]
-        if product["difficulty"] in ["Beginner", "Intermediate"]:
-            score += 1
-        return score
+    def score(p):
+        s = 0
+        if p["category"] == last_cat: s += 15
+        if p["category"] in cats: s += cats[p["category"]] * 3
+        if p["category"] in total_time: s += total_time[p["category"]] * 0.1
+        for t in p.get("tags","").split(","):
+            if t.strip() in tags: s += tags[t.strip()]
+        if p["difficulty"] in ["Beginner","Intermediate"]: s += 1
+        return s
     
-    ranked = sorted(products, key=relevance_score, reverse=True)
-    print(f"📊 Re-ranked: top category = {ranked[0]['category'] if ranked else 'none'}")
-    return ranked
+    return sorted(products, key=score, reverse=True)
 
 
 @trace_agent_step("retrieve_products")
 def retrieve_similar_products(interests: Dict[str, Any], db: Session) -> List[Dict]:
-    """Step 3: Smart retrieval + ALWAYS re-rank"""
-    retrieved = []
-    seen_ids = set()
-    
+    retrieved, seen_ids = [], set()
     categories = interests.get("categories", {})
     last_category = interests.get("last_viewed_category")
     tags = interests.get("tags", {})
+    total_time = interests.get("total_time", {})
     
-    sorted_categories = sorted(categories.items(), key=lambda x: x[1], reverse=True)
-    top_categories = [c[0] for c in sorted_categories[:3]]
+    sorted_cats = sorted(categories.items(), key=lambda x: total_time.get(x[0], 0), reverse=True)
+    top_categories = [c[0] for c in sorted_cats[:3]]
     
-    # STEP 1: Same category as last viewed
+    # Same category
     if last_category:
-        same_category = db.query(Product).filter(
-            Product.category == last_category
-        ).order_by(func.random()).limit(3).all()
-        for p in same_category:
+        for p in db.query(Product).filter(Product.category == last_category).order_by(func.random()).limit(3).all():
             if p.id not in seen_ids:
-                retrieved.append(product_to_dict(p))
-                seen_ids.add(p.id)
+                retrieved.append(product_to_dict(p)); seen_ids.add(p.id)
     
-    # STEP 2: Top categories
+    # Top categories
     for cat in top_categories:
         if cat != last_category and len(retrieved) < 5:
-            cat_products = db.query(Product).filter(
-                Product.category == cat
-            ).order_by(func.random()).limit(2).all()
-            for p in cat_products:
+            for p in db.query(Product).filter(Product.category == cat).order_by(func.random()).limit(2).all():
                 if p.id not in seen_ids and len(retrieved) < 5:
-                    retrieved.append(product_to_dict(p))
-                    seen_ids.add(p.id)
+                    retrieved.append(product_to_dict(p)); seen_ids.add(p.id)
     
-    # STEP 3: ChromaDB with REAL embeddings
+    # ChromaDB
     if len(retrieved) < 5 and top_categories:
         query_text = " ".join(top_categories + list(tags.keys())[:5])
         try:
             loop = asyncio.new_event_loop()
-            query_embedding = loop.run_until_complete(generate_embedding(query_text))
+            emb = loop.run_until_complete(generate_embedding(query_text))
             loop.close()
-            
-            results = search_similar_products(query_embedding, n_results=5)
-            
+            results = search_similar_products(emb, n_results=5)
             if results["ids"] and results["ids"][0]:
                 for pid in results["ids"][0]:
-                    if len(retrieved) >= 5:
-                        break
-                    product = db.query(Product).filter(Product.id == int(pid)).first()
-                    if product and product.id not in seen_ids:
-                        retrieved.append(product_to_dict(product))
-                        seen_ids.add(product.id)
-        except Exception as e:
-            print(f"ChromaDB failed: {e}")
+                    if len(retrieved) >= 5: break
+                    p = db.query(Product).filter(Product.id == int(pid)).first()
+                    if p and p.id not in seen_ids:
+                        retrieved.append(product_to_dict(p)); seen_ids.add(p.id)
+        except Exception as e: print(f"ChromaDB: {e}")
     
-    # STEP 4: Fill remaining
+    # HYBRID: Keyword search
+    if len(retrieved) < 5 and top_categories:
+        for cat in top_categories[:2]:
+            for p in db.query(Product).filter(
+                (Product.title.ilike(f'%{cat}%')) | (Product.description.ilike(f'%{cat}%')) | (Product.tags.ilike(f'%{cat}%'))
+            ).limit(3).all():
+                if p.id not in seen_ids and len(retrieved) < 5:
+                    retrieved.append(product_to_dict(p)); seen_ids.add(p.id)
+    
+    # Fill
     if len(retrieved) < 3:
-        fill_products = db.query(Product).order_by(func.random()).limit(5).all()
-        for p in fill_products:
+        for p in db.query(Product).order_by(func.random()).limit(5).all():
             if p.id not in seen_ids and len(retrieved) < 5:
-                retrieved.append(product_to_dict(p))
-                seen_ids.add(p.id)
+                retrieved.append(product_to_dict(p)); seen_ids.add(p.id)
     
-    # ALWAYS RE-RANK
-    ranked = rerank_products(retrieved, interests)
-    return ranked[:5]
+    return rerank(retrieved, interests)[:5]
 
 
-def product_to_dict(product: Product) -> Dict:
-    """Convert product to dictionary"""
-    return {
-        "id": product.id,
-        "title": product.title,
-        "category": product.category,
-        "description": product.description[:100],
-        "difficulty": product.difficulty,
-        "price": product.price,
-        "instructor": product.instructor,
-        "duration": product.duration,
-        "tags": product.tags
-    }
+def product_to_dict(p: Product) -> Dict:
+    return {"id": p.id, "title": p.title, "category": p.category, "description": p.description[:100],
+            "difficulty": p.difficulty, "price": p.price, "instructor": p.instructor,
+            "duration": p.duration, "tags": p.tags}
 
 
 @trace_agent_step("generate_message")
 def generate_message(interests: Dict[str, Any], products: List[Dict]) -> str:
-    """Step 4: Generate via Mesh API LLM"""
-    if not products:
-        return "Browse more courses to get personalized recommendations!"
-    
-    categories = interests.get("categories", {})
-    interest_str = ", ".join(list(categories.keys())[:3]) if categories else "technology"
+    if not products: return "Browse more courses to get personalized recommendations!"
+    cats = interests.get("categories", {})
+    interest_str = ", ".join(list(cats.keys())[:3]) or "technology"
     
     try:
-        from app.utils.mesh_api import generate_recommendation_message as mesh_generate
+        from app.utils.mesh_api import generate_recommendation_message as mesh_gen
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        message = loop.run_until_complete(mesh_generate(interest_str, products))
+        msg = loop.run_until_complete(mesh_gen(interest_str, products))
         loop.close()
-        if message and len(message) > 20:
-            return message
-    except Exception as e:
-        print(f"Mesh API failed: {e}")
+        if msg and len(msg) > 20: return msg
+    except Exception as e: print(f"Mesh: {e}")
     
-    product_names = [p["title"] for p in products[:3]]
-    return f"Based on your interest in {interest_str}, we recommend: {', '.join(product_names)}. Start learning today!"
+    names = [p["title"] for p in products[:3]]
+    return f"Based on your interest in {interest_str}, we recommend: {', '.join(names)}. Start learning today!"
 
 
 def run_recommendation_agent(user_id: int, db: Session) -> Dict[str, Any]:
-    """Run complete workflow"""
-    agent_start = time.time()
+    start = time.time()
     steps = {}
-    
     try:
         activities = load_user_activity(user_id, db)
-        steps["load_activity"] = f"{len(activities)} activities"
-        
+        steps["load"] = f"{len(activities)} activities"
         interests = analyze_interests(activities, db)
-        steps["analyze_interests"] = f"{len(interests.get('categories', {}))} categories"
-        
+        steps["analyze"] = f"{len(interests.get('categories',{}))} categories"
         products = retrieve_similar_products(interests, db)
-        steps["retrieve_products"] = f"{len(products)} products (re-ranked)"
-        
+        steps["retrieve"] = f"{len(products)} products (hybrid)"
         message = generate_message(interests, products)
-        steps["generate_message"] = f"{len(message)} chars"
+        steps["generate"] = f"{len(message)} chars"
         
-        total_time = time.time() - agent_start
-        steps["total_time"] = f"{total_time:.2f}s"
+        exec_time = f"{time.time() - start:.2f}s"
+        result = {"success": True, "message": message, "product_ids": [p["id"] for p in products],
+                  "products": products, "interests": {"categories": list(interests.get("categories",{}).keys()),
+                  "last_viewed": interests.get("last_viewed_category")}, "execution_time": exec_time}
         
-        result = {
-            "success": True,
-            "message": message,
-            "product_ids": [p["id"] for p in products],
-            "products": products,
-            "interests": {
-                "categories": list(interests.get("categories", {}).keys()),
-                "last_viewed": interests.get("last_viewed_category")
-            },
-            "execution_time": f"{total_time:.2f}s"
-        }
-        
-        print(f"✅ [AGENT] Complete in {total_time:.2f}s | {len(products)} products")
         trace_recommendation(user_id, steps, result)
-        
+        print(f"✅ [AGENT] {exec_time} | {len(products)} products (hybrid search)")
         return result
-        
     except Exception as e:
         return {"success": False, "message": str(e), "product_ids": [], "products": [], "interests": {}}
